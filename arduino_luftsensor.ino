@@ -1,7 +1,4 @@
-#include <WiFi.h>
-#include <WiFiClient.h>
 #include <WebServer.h>
-#include <ESPmDNS.h>
 
 #include "./creds.h"
 
@@ -11,6 +8,8 @@
 #include "sen_sensirion.h"
 #include "sen_co2.h"
 #include "sen_val.h"
+
+#include "wifi_con.h"
 
 
 #define WIDTH		128
@@ -32,38 +31,22 @@ WebServer server(80);
 
 
 void setup() {
-
 	Serial.begin(115200);
 
 	oled.init();
 	sen_co2.init();
 
-	// Sensirion init
 	initSensirion(&sen5x);
 
-	// Wifi init
-	WiFi.mode(WIFI_STA);
-	WiFi.begin(ssid, password);
-	// Wait for connection
-	while (WiFi.status() != WL_CONNECTED) {
-		delay(500);
-		Serial.print(".");
-	}
-	Serial.println("");
-	Serial.print("Connected to ");
-	Serial.println(ssid);
-	Serial.print("IP address: ");
-	Serial.println(WiFi.localIP());
+	connectToWifi(ssid, password);
 
-	if (MDNS.begin("air-analyzer")) {
-		Serial.println("MDNS responder started");
-	}
 	initServer();
-	Serial.println("HTTP server started");
+
+	Serial.println("ESP32 Initiated!");
 }
 
 void loop() {
-	// updateSensorValues(&sen, &sen_co2, &sen5x);
+	updateSensorValues(&sen, &sen_co2, &sen5x);
 
 	oled.clearDisplay();
 	oled.displayValue(0, 0, "CO2: %4.0fppm", (float)sen.co2_ppm);
