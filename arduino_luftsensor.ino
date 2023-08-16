@@ -1,16 +1,16 @@
-#include <Adafruit_SH110X.h>
-#include <Adafruit_GFX.h>
-
 #include <WiFi.h>
 #include <WiFiClient.h>
 #include <WebServer.h>
 #include <ESPmDNS.h>
 
-#include <SensirionI2CSen5x.h>
-#include <Wire.h>
-
 #include "./creds.h"
-#include "./http.h"
+
+#include "web_server.h"
+#include "oled.h"
+
+#include "sen_sensirion.h"
+#include "sen_co2.h"
+#include "sen_val.h"
 
 
 #define WIDTH		128
@@ -22,197 +22,24 @@
 #define OLED_DC		26
 #define OLED_CS		27
 
-#define RXD2 16
-#define TXD2 17
-
-typedef struct {
-	int co2_ppm;
-	float mcpm1p0_ug_m3;
-	float mcpm2p5_ug_m3;
-	float mcpm4p0_ug_m3;
-	float mcpm10p0_ug_m3;
-	float hum_p_rel;
-	float temp_c;
-	float VOC_index;
-	float NO2_index;
-} SensorValues;
-
-WebServer server(80);
-Adafruit_SH1106G oled(WIDTH, HEIGHT, OLED_SDA, OLED_SCL, OLED_DC, OLED_RST, OLED_CS);
-String tmpString = "";
-SensorValues sen;
+Oled_Display oled(
+	new Adafruit_SH1106G(WIDTH, HEIGHT, OLED_SDA, OLED_SCL, OLED_DC, OLED_RST, OLED_CS)
+);
+Sen_CO2 sen_co2;
 SensirionI2CSen5x sen5x;
+SensorValues sen;
+WebServer server(80);
 
-void handleRoot() {
-	tmpString = html_1;
-	tmpString.replace("%co2_val%", String(sen.co2_ppm));
-	tmpString.replace("%temp_val%", String(sen.temp_c));
-	tmpString.replace("%hum_val%", String(sen.hum_p_rel));
-	tmpString.replace("%pm_val%", String(sen.mcpm2p5_ug_m3));
-	tmpString.replace("%voxi_val%", String(sen.VOC_index));
-	tmpString.replace("%no2i_val%", String(sen.NO2_index));
-	server.send(200, "text/html", tmpString);
-}
-
-void handleNotFound() {
-	String message = "File Not Found\n\n";
-	message += "URI: ";
-	message += server.uri();
-	message += "\nMethod: ";
-	message += (server.method() == HTTP_GET) ? "GET" : "POST";
-	message += "\nArguments: ";
-	message += server.args();
-	message += "\n";
-	for (uint8_t i = 0; i < server.args(); i++) {
-		message += " " + server.argName(i) + ": " + server.arg(i) + "\n";
-	}
-	server.send(404, "text/plain", message);
-}
-
-void displayValue(int x, int y, const char* pretext, float val) {
-	oled.setCursor(x, y);
-	char* text = (char*)malloc(sizeof(char) * 20);
-	sprintf(text, pretext, val);
-	oled.print(text);
-	free(text);
-}
-
-void initOLED() {
-	oled.begin(0, true);
-	oled.setTextColor(SH110X_WHITE);
-	oled.setTextSize(1);
-	oled.clearDisplay();
-	oled.display();
-}
-
-void initSensirion() {
-	Wire.begin(19, 18);
-
-	sen5x.begin(Wire);
-
-	uint16_t error;
-	char errorMessage[256];
-	error = sen5x.deviceReset();
-	if (error) {
-		Serial.print("Error trying to execute deviceReset(): ");
-		errorToString(error, errorMessage, 256);
-		Serial.println(errorMessage);
-	}
-
-	// Print SEN55 module information if i2c buffers are large enough
-#ifdef USE_PRODUCT_INFO
-	printSerialNumber();
-	printModuleVersions();
-#endif
-
-	// set a temperature offset in degrees celsius
-	// Note: supported by SEN54 and SEN55 sensors
-	// By default, the temperature and humidity outputs from the sensor
-	// are compensated for the modules self-heating. If the module is
-	// designed into a device, the temperature compensation might need
-	// to be adapted to incorporate the change in thermal coupling and
-	// self-heating of other device components.
-	//
-	// A guide to achieve optimal performance, including references
-	// to mechanical design-in examples can be found in the app note
-	// “SEN5x – Temperature Compensation Instruction” at www.sensirion.com.
-	// Please refer to those application notes for further information
-	// on the advanced compensation settings used
-	// in `setTemperatureOffsetParameters`, `setWarmStartParameter` and
-	// `setRhtAccelerationMode`.
-	//
-	// Adjust tempOffset to account for additional temperature offsets
-	// exceeding the SEN module's self heating.
-	float tempOffset = 0.0;
-	error = sen5x.setTemperatureOffsetSimple(tempOffset);
-	if (error) {
-		Serial.print("Error trying to execute setTemperatureOffsetSimple(): ");
-		errorToString(error, errorMessage, 256);
-		Serial.println(errorMessage);
-	} else {
-		Serial.print("Temperature Offset set to ");
-		Serial.print(tempOffset);
-		Serial.println(" deg. Celsius (SEN54/SEN55 only");
-	}
-
-	// Start Measurement
-	error = sen5x.startMeasurement();
-	if (error) {
-		Serial.print("Error trying to execute startMeasurement(): ");
-		errorToString(error, errorMessage, 256);
-		Serial.println(errorMessage);
-	}
-}
-
-int getCO2() {
-	Serial2.write(0xFF);
-	Serial2.write(0x01);
-	Serial2.write(0x86);
-	Serial2.write(0x00);
-	Serial2.write(0x00);
-	Serial2.write(0x00);
-	Serial2.write(0x00);
-	Serial2.write(0x00);
-	Serial2.write(0x79);
-
-	Serial2.flush();
-	// delay(100);
-	byte* retVal = (byte*)malloc(9);
-	Serial2.readBytes(retVal, 9);
-	int ret = retVal[2] * 256 + retVal[3];
-	free(retVal);
-
-	return ret;
-}
-
-void updateSensorValues() {
-	sen.co2_ppm = getCO2();
-	uint16_t error;
-	char errorMessage[256];
-
-	// Read Measurement
-	float massConcentrationPm1p0;
-	float massConcentrationPm2p5;
-	float massConcentrationPm4p0;
-	float massConcentrationPm10p0;
-	float ambientHumidity;
-	float ambientTemperature;
-	float vocIndex;
-	float noxIndex;
-
-	error = sen5x.readMeasuredValues(
-		massConcentrationPm1p0, massConcentrationPm2p5, massConcentrationPm4p0,
-		massConcentrationPm10p0, ambientHumidity, ambientTemperature, vocIndex,
-		noxIndex);
-
-	if (error) {
-		Serial.print("Error trying to execute readMeasuredValues(): ");
-		errorToString(error, errorMessage, 256);
-		Serial.println(errorMessage);
-	} else {
-		sen.temp_c = ambientTemperature;
-		sen.hum_p_rel = ambientHumidity;
-		sen.mcpm1p0_ug_m3 = massConcentrationPm1p0;
-		sen.mcpm2p5_ug_m3 = massConcentrationPm2p5;
-		sen.mcpm4p0_ug_m3 = massConcentrationPm4p0;
-		sen.mcpm10p0_ug_m3 = massConcentrationPm10p0;
-		sen.VOC_index = vocIndex;
-		sen.NO2_index = noxIndex;
-	}
-}
 
 void setup() {
 
 	Serial.begin(115200);
 
-	// OLED init
-	initOLED();
-
-	// CO2 Sensor init
-	Serial2.begin(9600, SERIAL_8N1, RXD2, TXD2);
+	oled.init();
+	sen_co2.init();
 
 	// Sensirion init
-	initSensirion();
+	initSensirion(&sen5x);
 
 	// Wifi init
 	WiFi.mode(WIFI_STA);
@@ -231,25 +58,20 @@ void setup() {
 	if (MDNS.begin("air-analyzer")) {
 		Serial.println("MDNS responder started");
 	}
-
-	server.on("/", handleRoot);
-
-	server.onNotFound(handleNotFound);
-
-	server.begin();
+	initServer();
 	Serial.println("HTTP server started");
 }
 
 void loop() {
-	updateSensorValues();
+	// updateSensorValues(&sen, &sen_co2, &sen5x);
 
 	oled.clearDisplay();
-	displayValue(0, 0, "CO2: %4.0fppm", (float)sen.co2_ppm);
-	displayValue(0, 9, "Temp: %2.2fC", (float)sen.temp_c);
-	displayValue(0, 18, "Hum: %3.2f%%", (float)sen.hum_p_rel);
-	displayValue(0, 27, "PM2.5: %4.2f", (float)sen.mcpm2p5_ug_m3);
-	displayValue(0, 36, "VOXi: %4.2f", (float)sen.VOC_index);
-	displayValue(0, 45, "NO2i: %4.2f", (float)sen.NO2_index);
+	oled.displayValue(0, 0, "CO2: %4.0fppm", (float)sen.co2_ppm);
+	oled.displayValue(0, 9, "Temp: %2.2fC", (float)sen.temp_c);
+	oled.displayValue(0, 18, "Hum: %3.2f%%", (float)sen.hum_p_rel);
+	oled.displayValue(0, 27, "PM2.5: %4.2f", (float)sen.mcpm2p5_ug_m3);
+	oled.displayValue(0, 36, "VOXi: %4.2f", (float)sen.VOC_index);
+	oled.displayValue(0, 45, "NO2i: %4.2f", (float)sen.NO2_index);
 	oled.display();
 
 	server.handleClient();

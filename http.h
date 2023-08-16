@@ -1,3 +1,4 @@
+#pragma once
 extern String html_1 = R"=====(
 <!DOCTYPE html>
 <html>
